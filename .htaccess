@@ -1,0 +1,12 @@
+<IfModule mod_rewrite.c>
+RewriteEngine On
+
+# Prevent direct access to sensitive files/folders if needed (optional but recommended)
+RewriteRule ^passwords\.php$ - [F,L]
+RewriteRule ^backend/ - [F,L]
+
+# Route all requests to project_root/index.php
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ project_root/index.php [QSA,L]
+</IfModule>

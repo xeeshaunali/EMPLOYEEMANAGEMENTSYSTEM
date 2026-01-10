@@ -1,0 +1,1 @@
+<?php header('Location: project_root/index.php'); exit; ?>
