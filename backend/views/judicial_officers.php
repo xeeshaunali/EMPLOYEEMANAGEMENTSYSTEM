@@ -125,8 +125,15 @@ try {
     // Delete
     if (isset($_GET['delete'])) {
         $id = (int)$_GET['delete'];
-        $pdo->prepare("DELETE FROM judicial_officers WHERE id = ?")->execute([$id]);
-        $success = "Judicial Officer deleted.";
+        
+        // Check if officer has any related records before deletion
+        $checkStmt = $pdo->prepare("SELECT COUNT(*) FROM judicial_officers WHERE id = ?");
+        $checkStmt->execute([$id]);
+        if ($checkStmt->fetchColumn() > 0) {
+            $pdo->prepare("DELETE FROM judicial_officers WHERE id = ?")->execute([$id]);
+            $success = "Judicial Officer deleted successfully.";
+        }
+        
         header('Location: ?page=judicial_officers');
         exit;
     }
@@ -140,6 +147,13 @@ try {
 } catch (Exception $e) {
     $courts = [];
     $error = $error ?: ("Failed to load courts: " . htmlspecialchars($e->getMessage()));
+}
+
+try {
+    $judicialPosts = $pdo->query("SELECT id, post_name FROM judicial_post ORDER BY id ASC")->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $judicialPosts = [];
+    $error = $error ?: ("Failed to load judicial posts: " . htmlspecialchars($e->getMessage()));
 }
 
 try {
@@ -161,6 +175,20 @@ try {
     $error = $error ?: ("Failed to load officers: " . htmlspecialchars($e->getMessage()));
 }
 
+// Get statistics
+$stats = [
+    'total' => count($officers),
+    'posted' => 0,
+    'transferred' => 0,
+    'with_court' => 0
+];
+
+foreach ($officers as $o) {
+    if ($o['status'] === 'Posted') $stats['posted']++;
+    if ($o['status'] === 'Transferred') $stats['transferred']++;
+    if (!empty($o['court_id'])) $stats['with_court']++;
+}
+
 // If editing
 $editOfficer = null;
 if (isset($_GET['edit'])) {
@@ -177,159 +205,604 @@ if (isset($_GET['edit'])) {
 include __DIR__ . '/header.php';
 ?>
 
-<!-- Toast Container -->
-<div class="position-fixed top-0 end-0 p-3" style="z-index: 1100">
-    <?php if ($success): ?>
-        <div class="toast align-items-center text-bg-success border-0 show" role="alert">
-            <div class="d-flex">
-                <div class="toast-body"><?= htmlspecialchars($success) ?></div>
-                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-            </div>
-        </div>
-    <?php elseif ($error): ?>
-        <div class="toast align-items-center text-bg-danger border-0 show" role="alert">
-            <div class="d-flex">
-                <div class="toast-body"><?= htmlspecialchars($error) ?></div>
-                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-            </div>
-        </div>
-    <?php endif; ?>
-</div>
+<style>
+    :root {
+        --primary-color: #005566;
+        --secondary-color: #007bff;
+        --success-color: #28a745;
+        --warning-color: #ffc107;
+        --danger-color: #dc3545;
+        --info-color: #17a2b8;
+    }
 
-<div class="card shadow-sm border-0 mb-4">
-    <div class="card-header bg-primary text-white d-flex justify-content-between">
-        <h5 class="mb-0"><i class="bi bi-person-badge me-1 rounded shadow"></i>Add Judicial Officers</h5>
+    .page-title {
+        background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+        color: white;
+        padding: 2rem;
+        border-radius: 15px;
+        margin-bottom: 2rem;
+        box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+        position: relative;
+        overflow: hidden;
+    }
+    .page-title::before {
+        content: '\f4fe';
+        font-family: 'Font Awesome 6 Free';
+        font-weight: 900;
+        position: absolute;
+        right: 20px;
+        bottom: -20px;
+        font-size: 8rem;
+        opacity: 0.1;
+        color: white;
+    }
+    .page-title h2 {
+        margin: 0;
+        font-weight: 700;
+        font-size: 2.2rem;
+    }
+    .page-title p {
+        margin: 0.5rem 0 0;
+        opacity: 0.95;
+        font-size: 1.1rem;
+    }
+
+    /* Stats Cards */
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1.5rem;
+        margin-bottom: 2rem;
+    }
+    .stat-card {
+        background: white;
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        border-left: 4px solid var(--primary-color);
+        transition: all 0.3s;
+        position: relative;
+        overflow: hidden;
+    }
+    .stat-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 25px rgba(0,85,102,0.15);
+    }
+    .stat-card .stat-icon {
+        position: absolute;
+        right: 1rem;
+        top: 1rem;
+        font-size: 2.5rem;
+        opacity: 0.2;
+        color: var(--primary-color);
+    }
+    .stat-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: var(--primary-color);
+        margin: 0;
+        line-height: 1.2;
+    }
+    .stat-label {
+        color: #6c757d;
+        margin: 0.3rem 0 0;
+        font-size: 0.9rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .stat-card.posted {
+        border-left-color: var(--success-color);
+    }
+    .stat-card.posted .stat-value {
+        color: var(--success-color);
+    }
+    .stat-card.transferred {
+        border-left-color: var(--warning-color);
+    }
+    .stat-card.transferred .stat-value {
+        color: var(--warning-color);
+    }
+
+    /* Form Card */
+    .form-card {
+        background: white;
+        border-radius: 15px;
+        box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+        overflow: hidden;
+        margin-bottom: 2rem;
+        border: 1px solid rgba(0,85,102,0.1);
+    }
+    .form-header {
+        background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+        color: white;
+        padding: 1rem 1.5rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+    .form-header i {
+        font-size: 1.2rem;
+    }
+    .form-body {
+        padding: 2rem;
+        background: #f8fafc;
+    }
+    .form-label {
+        font-weight: 600;
+        color: #2c3e50;
+        font-size: 0.9rem;
+        margin-bottom: 0.3rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .form-label i {
+        color: var(--primary-color);
+        font-size: 0.9rem;
+    }
+    .form-control, .form-select {
+        border-radius: 8px;
+        border: 2px solid #e9ecef;
+        padding: 0.7rem 1rem;
+        transition: all 0.3s;
+    }
+    .form-control:focus, .form-select:focus {
+        border-color: var(--primary-color);
+        box-shadow: 0 0 0 0.2rem rgba(0,85,102,0.15);
+    }
+    .form-control:hover, .form-select:hover {
+        border-color: #adb5bd;
+    }
+
+    .btn-submit {
+        background: linear-gradient(90deg, var(--success-color), #20c997);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.8rem 2rem;
+        font-weight: 600;
+        transition: all 0.3s;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        width: 100%;
+    }
+    .btn-submit:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(40,167,69,0.3);
+    }
+    .btn-update {
+        background: linear-gradient(90deg, var(--warning-color), #ffb300);
+        color: #333;
+        border: none;
+        border-radius: 8px;
+        padding: 0.8rem 2rem;
+        font-weight: 600;
+        transition: all 0.3s;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        width: 100%;
+    }
+    .btn-update:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(255,193,7,0.3);
+    }
+    .btn-cancel {
+        background: #6c757d;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.8rem 2rem;
+        font-weight: 600;
+        transition: all 0.3s;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        text-decoration: none;
+        width: 100%;
+    }
+    .btn-cancel:hover {
+        background: #5a6268;
+        color: white;
+        transform: translateY(-2px);
+    }
+
+    /* Table Styles */
+    .table-container {
+        background: white;
+        border-radius: 15px;
+        box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+        overflow: hidden;
+    }
+    .table-header {
+        background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+        color: white;
+        padding: 1rem 1.5rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .table-header .badge {
+        background: rgba(255,255,255,0.2);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 20px;
+        font-size: 0.9rem;
+    }
+    .table {
+        margin: 0;
+        font-size: 0.95rem;
+    }
+    .table thead {
+        background: linear-gradient(90deg, #f8f9fa, #e9ecef);
+    }
+    .table thead th {
+        color: var(--primary-color);
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 0.85rem;
+        letter-spacing: 0.5px;
+        padding: 1rem;
+        border-bottom: 2px solid var(--primary-color);
+        white-space: nowrap;
+    }
+    .table tbody tr {
+        transition: all 0.2s;
+    }
+    .table tbody tr:hover {
+        background-color: #f1f8ff !important;
+        transform: scale(1.01);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .table td {
+        padding: 1rem;
+        vertical-align: middle;
+    }
+
+    .status-badge {
+        padding: 0.3rem 0.8rem;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        display: inline-block;
+    }
+    .status-posted {
+        background: #d4edda;
+        color: #155724;
+    }
+    .status-transferred {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    .btn-action {
+        padding: 0.4rem 0.8rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        transition: all 0.3s;
+        margin: 0 2px;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+    }
+    .btn-action:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    .btn-edit {
+        background: var(--warning-color);
+        color: #333;
+        border: none;
+    }
+    .btn-delete {
+        background: var(--danger-color);
+        color: white;
+        border: none;
+    }
+
+    /* Toast Container */
+    .toast-container {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 1100;
+    }
+    .toast {
+        border-radius: 10px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+        .page-title h2 { font-size: 1.6rem; }
+        .stats-grid { grid-template-columns: 1fr; }
+        .table td { white-space: nowrap; }
+    }
+</style>
+
+<div class="container-fluid mt-4">
+    <!-- Page Title -->
+    <div class="page-title">
+        <h2><i class="fas fa-gavel me-3"></i>Judicial Officers Management</h2>
+        <p>Manage judicial officers, their postings, transfers, and court assignments</p>
     </div>
-    <div class="card-body">
 
-        <!-- Add / Edit Form -->
-        <form method="post" class="row g-2 mb-4">
-            <input type="hidden" name="id" value="<?= $editOfficer['id'] ?? '' ?>">
+    <!-- Statistics Cards -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-icon"><i class="fas fa-users"></i></div>
+            <div class="stat-value"><?= $stats['total'] ?></div>
+            <div class="stat-label">Total Officers</div>
+        </div>
+        <div class="stat-card posted">
+            <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
+            <div class="stat-value"><?= $stats['posted'] ?></div>
+            <div class="stat-label">Posted</div>
+        </div>
+        <div class="stat-card transferred">
+            <div class="stat-icon"><i class="fas fa-exchange-alt"></i></div>
+            <div class="stat-value"><?= $stats['transferred'] ?></div>
+            <div class="stat-label">Transferred</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon"><i class="fas fa-building"></i></div>
+            <div class="stat-value"><?= $stats['with_court'] ?></div>
+            <div class="stat-label">With Court</div>
+        </div>
+    </div>
 
-            <div class="col-md-3 shadow rounded">
-                <input type="text" name="name" class="form-control" placeholder="Officer Name"
-                       value="<?= htmlspecialchars($editOfficer['name'] ?? '') ?>" required>                
+    <!-- Toast Container -->
+    <div class="toast-container">
+        <?php if ($success): ?>
+            <div class="toast align-items-center text-white bg-success border-0 show" role="alert">
+                <div class="d-flex">
+                    <div class="toast-body">
+                        <i class="fas fa-check-circle me-2"></i><?= htmlspecialchars($success) ?>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+                </div>
             </div>
-
-            <select name="post" class="form-control col-md-3" required>
-                <option value="">-- Select Post --</option>
-                <?php
-                $stmt = $pdo->query("SELECT id, post_name FROM judicial_post ORDER BY id ASC");
-                while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                    echo "<option value='{$row['post_name']}'>{$row['post_name']}</option>";
-                }
-                ?>
-            </select>
-
-
-
-            <!-- <div class="col-md-3">
-                <input type="text" name="post" class="form-control" placeholder="Post"
-                       value="<?= htmlspecialchars($editOfficer['post'] ?? '') ?>" required>
-            </div> -->
-            <div class="col-md-3">
-                <input type="text" name="bps" class="form-control" placeholder="BPS"
-                       value="<?= htmlspecialchars($editOfficer['bps'] ?? '') ?>" required>
+        <?php elseif ($error): ?>
+            <div class="toast align-items-center text-white bg-danger border-0 show" role="alert">
+                <div class="d-flex">
+                    <div class="toast-body">
+                        <i class="fas fa-exclamation-circle me-2"></i><?= htmlspecialchars($error) ?>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+                </div>
             </div>
-            <div class="col-md-3">
-                <select name="court_id" class="form-select">
-                    <option value="">-- Court --</option>
-                    <?php foreach ($courts as $c): ?>
-                        <option value="<?= $c['id'] ?>"
-                            <?= (isset($editOfficer['court_id']) && (string)$editOfficer['court_id'] === (string)$c['id']) ? 'selected' : '' ?>>
-                            <?= htmlspecialchars($c['name']) ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
+        <?php endif; ?>
+    </div>
 
-            <div class="col-md-3">
-                <select name="status" id="status" class="form-select" required>
-                    <?php $st = $editOfficer['status'] ?? 'Posted'; ?>
-                    <option value="Posted" <?= ($st === 'Posted') ? 'selected' : '' ?>>Posted</option>
-                    <option value="Transferred" <?= ($st === 'Transferred') ? 'selected' : '' ?>>Transferred</option>
-                </select>
-            </div>
+    <!-- Form Card -->
+    <div class="form-card">
+        <div class="form-header">
+            <i class="fas <?= $editOfficer ? 'fa-edit' : 'fa-user-plus' ?>"></i>
+            <span><?= $editOfficer ? 'Edit Judicial Officer' : 'Add New Judicial Officer' ?></span>
+        </div>
+        <div class="form-body">
+            <form method="post" class="row g-3">
+                <input type="hidden" name="id" value="<?= $editOfficer['id'] ?? '' ?>">
 
-            <div class="col-md-3">
-                <input type="date" name="joining_date" class="form-control"
-                       value="<?= htmlspecialchars($editOfficer['joining_date'] ?? '') ?>"
-                       placeholder="Joining Date">
-            </div>
+                <div class="col-md-4">
+                    <label class="form-label"><i class="fas fa-user-tie"></i> Officer Name</label>
+                    <input type="text" name="name" class="form-control" placeholder="Enter full name"
+                           value="<?= htmlspecialchars($editOfficer['name'] ?? '') ?>" required>
+                </div>
 
-            <div class="col-md-2 rounded shadow" id="transferredDateCol">
-                <input type="date" name="transferred_date" class="form-control"
-                       value="<?= htmlspecialchars($editOfficer['transferred_date'] ?? '') ?>"
-                       placeholder="Transferred Date">
-            </div>
+                <div class="col-md-4">
+                    <label class="form-label"><i class="fas fa-briefcase"></i> Post</label>
+                    <select name="post" class="form-select" required>
+                        <option value="">-- Select Post --</option>
+                        <?php foreach ($judicialPosts as $jp): ?>
+                            <option value="<?= htmlspecialchars($jp['post_name']) ?>"
+                                <?= (isset($editOfficer['post']) && $editOfficer['post'] === $jp['post_name']) ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($jp['post_name']) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
 
-            <div class="col-md-3" id="transferredDistrictCol">
-                <select name="transferred_district" class="form-select">
-                    <option value="">-- Select District --</option>
-                    <?php foreach ($districts as $d): ?>
-                        <option value="<?= htmlspecialchars($d['name']) ?>"
-                            <?= (isset($editOfficer['transferred_district']) && $editOfficer['transferred_district'] === $d['name']) ? 'selected' : '' ?>>
-                            <?= htmlspecialchars($d['name']) ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
+                <div class="col-md-2">
+                    <label class="form-label"><i class="fas fa-layer-group"></i> BPS</label>
+                    <select name="bps" class="form-select" required>
+                        <option value="">-- BPS --</option>
+                        <?php for($i = 1; $i <= 22; $i++): ?>
+                            <option value="<?= $i ?>" <?= (isset($editOfficer['bps']) && $editOfficer['bps'] == $i) ? 'selected' : '' ?>>
+                                BPS-<?= $i ?>
+                            </option>
+                        <?php endfor; ?>
+                    </select>
+                </div>
 
-            <div class="col-md-2 d-flex">
-                <button type="submit" class="btn btn-success me-1">
-                    <?= $editOfficer ? 'Update' : 'Add' ?>
-                </button>
-                <?php if ($editOfficer): ?>
-                    <a href="?page=judicial_officers" class="btn btn-secondary">Cancel</a>
-                <?php endif; ?>
-            </div>
-        </form>
+                <div class="col-md-4">
+                    <label class="form-label"><i class="fas fa-building"></i> Court</label>
+                    <select name="court_id" class="form-select">
+                        <option value="">-- Select Court (Optional) --</option>
+                        <?php foreach ($courts as $c): ?>
+                            <option value="<?= $c['id'] ?>"
+                                <?= (isset($editOfficer['court_id']) && (string)$editOfficer['court_id'] === (string)$c['id']) ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($c['name']) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
 
-        <!-- Officers Table -->
-        <table class="table table-bordered table-striped">
-            <thead class="table-light">
-                <tr>
-                    <th>ID</th>
-                    <th>Name</th>
-                    <th>Post</th>
-                    <th>BPS</th>
-                    <th>Court</th>
-                    <th>Status</th>
-                    <th>Joining Date</th>
-                    <th>Transferred Date</th>
-                    <th>Transferred District</th>
-                    <th>Created</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php if (empty($officers)): ?>
-                    <tr><td colspan="11" class="text-center">No officers found.</td></tr>
-                <?php else: ?>
-                    <?php foreach ($officers as $o): ?>
+                <div class="col-md-3">
+                    <label class="form-label"><i class="fas fa-info-circle"></i> Status</label>
+                    <select name="status" id="status" class="form-select" required>
+                        <?php $st = $editOfficer['status'] ?? 'Posted'; ?>
+                        <option value="Posted" <?= ($st === 'Posted') ? 'selected' : '' ?>>Posted</option>
+                        <option value="Transferred" <?= ($st === 'Transferred') ? 'selected' : '' ?>>Transferred</option>
+                    </select>
+                </div>
+
+                <div class="col-md-3">
+                    <label class="form-label"><i class="fas fa-calendar-plus"></i> Joining Date</label>
+                    <input type="date" name="joining_date" class="form-control"
+                           value="<?= htmlspecialchars($editOfficer['joining_date'] ?? '') ?>"
+                           placeholder="Joining Date">
+                </div>
+
+                <div class="col-md-3" id="transferredDateCol">
+                    <label class="form-label"><i class="fas fa-calendar-times"></i> Transferred Date</label>
+                    <input type="date" name="transferred_date" class="form-control"
+                           value="<?= htmlspecialchars($editOfficer['transferred_date'] ?? '') ?>"
+                           placeholder="Transferred Date">
+                </div>
+
+                <div class="col-md-3" id="transferredDistrictCol">
+                    <label class="form-label"><i class="fas fa-map-marker-alt"></i> Transferred District</label>
+                    <select name="transferred_district" class="form-select">
+                        <option value="">-- Select District --</option>
+                        <?php foreach ($districts as $d): ?>
+                            <option value="<?= htmlspecialchars($d['name']) ?>"
+                                <?= (isset($editOfficer['transferred_district']) && $editOfficer['transferred_district'] === $d['name']) ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($d['name']) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <div class="col-md-6 d-flex align-items-end">
+                    <div class="row w-100 g-2">
+                        <div class="col">
+                            <button type="submit" class="btn <?= $editOfficer ? 'btn-update' : 'btn-submit' ?>">
+                                <i class="fas <?= $editOfficer ? 'fa-sync' : 'fa-save' ?>"></i> 
+                                <?= $editOfficer ? 'Update Officer' : 'Add Officer' ?>
+                            </button>
+                        </div>
+                        <?php if ($editOfficer): ?>
+                            <div class="col">
+                                <a href="?page=judicial_officers" class="btn-cancel">
+                                    <i class="fas fa-times"></i> Cancel
+                                </a>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Officers Table -->
+    <div class="table-container">
+        <div class="table-header">
+            <span>
+                <i class="fas fa-list me-2"></i>
+                Judicial Officers Directory
+            </span>
+            <span class="badge">
+                <i class="fas fa-database me-1"></i> 
+                <?= count($officers) ?> Records
+            </span>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Officer Name</th>
+                        <th>Post</th>
+                        <th>BPS</th>
+                        <th>Court</th>
+                        <th>Status</th>
+                        <th>Joining Date</th>
+                        <th>Transferred Date</th>
+                        <th>Transferred District</th>
+                        <th>Created</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php if (empty($officers)): ?>
                         <tr>
-                            <td><?= (int)$o['id'] ?></td>
-                            <td><?= htmlspecialchars($o['name'] ?? '') ?></td>
-                            <td><?= htmlspecialchars($o['post'] ?? '') ?></td>
-                            <td><?= htmlspecialchars($o['bps'] ?? '') ?></td>
-                            <td><?= htmlspecialchars($o['court_name'] ?? '—') ?></td>
-                            <td><?= htmlspecialchars($o['status'] ?? 'Posted') ?></td>
-                            <td><?= htmlspecialchars($o['joining_date'] ?? '—') ?></td>
-                            <td><?= htmlspecialchars($o['transferred_date'] ?? '—') ?></td>
-                            <td><?= htmlspecialchars($o['transferred_district'] ?? '—') ?></td>
-                            <td><?= htmlspecialchars($o['created_at'] ?? '—') ?></td>
-                            <td>
-                                <a href="?page=judicial_officers&edit=<?= (int)$o['id'] ?>"
-                                   class="btn btn-sm btn-warning">Edit</a>
-                                <a href="?page=judicial_officers&delete=<?= (int)$o['id'] ?>"
-                                   class="btn btn-sm btn-danger"
-                                   onclick="return confirm('Delete this officer?');">Delete</a>
+                            <td colspan="11" class="text-center py-5">
+                                <i class="fas fa-user-slash fa-4x text-muted mb-3"></i>
+                                <h5 class="text-muted">No Judicial Officers Found</h5>
+                                <p class="text-muted">Add your first judicial officer using the form above.</p>
                             </td>
                         </tr>
-                    <?php endforeach; ?>
-                <?php endif; ?>
-            </tbody>
-        </table>
+                    <?php else: ?>
+                        <?php foreach ($officers as $o): ?>
+                            <tr>
+                                <td><span class="badge bg-secondary">#<?= (int)$o['id'] ?></span></td>
+                                <td>
+                                    <strong><?= htmlspecialchars($o['name'] ?? '') ?></strong>
+                                </td>
+                                <td><?= htmlspecialchars($o['post'] ?? '') ?></td>
+                                <td><span class="badge bg-info">BPS-<?= htmlspecialchars($o['bps'] ?? '') ?></span></td>
+                                <td>
+                                    <?php if (!empty($o['court_name'])): ?>
+                                        <span class="d-flex align-items-center gap-1">
+                                            <i class="fas fa-building text-muted small"></i>
+                                            <?= htmlspecialchars($o['court_name']) ?>
+                                        </span>
+                                    <?php else: ?>
+                                        <span class="text-muted">—</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <span class="status-badge <?= $o['status'] === 'Posted' ? 'status-posted' : 'status-transferred' ?>">
+                                        <?= htmlspecialchars($o['status'] ?? 'Posted') ?>
+                                    </span>
+                                </td>
+                                <td><?= !empty($o['joining_date']) ? date('d-m-Y', strtotime($o['joining_date'])) : '—' ?></td>
+                                <td><?= !empty($o['transferred_date']) ? date('d-m-Y', strtotime($o['transferred_date'])) : '—' ?></td>
+                                <td><?= htmlspecialchars($o['transferred_district'] ?? '—') ?></td>
+                                <td>
+                                    <span title="<?= date('d M Y H:i', strtotime($o['created_at'])) ?>">
+                                        <?= date('d-m-Y', strtotime($o['created_at'])) ?>
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="btn-group" role="group">
+                                        <a href="?page=judicial_officers&edit=<?= (int)$o['id'] ?>"
+                                           class="btn-action btn-edit" 
+                                           title="Edit Officer">
+                                            <i class="fas fa-edit"></i>
+                                        </a>
+                                        <a href="?page=judicial_officers&delete=<?= (int)$o['id'] ?>"
+                                           class="btn-action btn-delete"
+                                           onclick="return confirmDelete('<?= htmlspecialchars($o['name']) ?>')"
+                                           title="Delete Officer">
+                                            <i class="fas fa-trash"></i>
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Table Footer -->
+        <?php if (!empty($officers)): ?>
+        <div class="p-3 bg-light border-top d-flex justify-content-between align-items-center">
+            <div class="text-muted small">
+                <i class="fas fa-file me-1"></i>
+                Showing <?= count($officers) ?> officers • 
+                <i class="fas fa-check-circle ms-2 me-1 text-success"></i><?= $stats['posted'] ?> Posted • 
+                <i class="fas fa-exchange-alt ms-2 me-1 text-warning"></i><?= $stats['transferred'] ?> Transferred
+            </div>
+            <div>
+                <button class="btn btn-sm btn-outline-primary" onclick="exportToExcel()">
+                    <i class="fas fa-file-excel"></i> Export
+                </button>
+                <button class="btn btn-sm btn-outline-secondary ms-2" onclick="window.print()">
+                    <i class="fas fa-print"></i> Print
+                </button>
+            </div>
+        </div>
+        <?php endif; ?>
     </div>
 </div>
 
@@ -342,8 +815,14 @@ function toggleTransferredFields() {
     if (!statusEl) return;
 
     if (statusEl.value === 'Transferred') {
-        if (dateCol) dateCol.style.display = '';
-        if (districtCol) districtCol.style.display = '';
+        if (dateCol) {
+            dateCol.style.display = '';
+            dateCol.style.opacity = '1';
+        }
+        if (districtCol) {
+            districtCol.style.display = '';
+            districtCol.style.opacity = '1';
+        }
     } else {
         if (dateCol) {
             dateCol.style.display = 'none';
@@ -357,6 +836,57 @@ function toggleTransferredFields() {
         }
     }
 }
+
+// Delete confirmation with officer name
+function confirmDelete(officerName) {
+    return confirm(`Are you sure you want to delete "${officerName}"?\nThis action cannot be undone.`);
+}
+
+// Export to Excel
+function exportToExcel() {
+    const table = document.querySelector('.table');
+    const rows = [];
+    
+    // Get headers
+    const headers = [];
+    table.querySelectorAll('thead th').forEach((th, index) => {
+        // Skip actions column (last column)
+        if (index < table.querySelectorAll('thead th').length - 1) {
+            headers.push(th.innerText);
+        }
+    });
+    rows.push(headers.join(','));
+    
+    // Get data rows
+    table.querySelectorAll('tbody tr').forEach(tr => {
+        if (tr.querySelector('td[colspan]')) return; // Skip "no records" row
+        const row = [];
+        tr.querySelectorAll('td').forEach((td, index) => {
+            // Skip actions column (last column)
+            if (index < tr.querySelectorAll('td').length - 1) {
+                // Clean the text - remove HTML tags and extra spaces
+                let text = td.innerText.replace(/\s+/g, ' ').trim();
+                // Escape quotes
+                text = text.replace(/"/g, '""');
+                row.push('"' + text + '"');
+            }
+        });
+        rows.push(row.join(','));
+    });
+    
+    // Download CSV
+    const csvContent = rows.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'judicial_officers_' + new Date().toISOString().slice(0,10) + '.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+// Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     toggleTransferredFields();
     var statusEl = document.getElementById('status');
@@ -369,6 +899,40 @@ document.addEventListener('DOMContentLoaded', function() {
             t.show();
         }
     });
+
+    // Add animation to status changes
+    if (statusEl) {
+        statusEl.addEventListener('change', function() {
+            const dateCol = document.getElementById('transferredDateCol');
+            const districtCol = document.getElementById('transferredDistrictCol');
+            
+            if (this.value === 'Transferred') {
+                dateCol.style.opacity = '0';
+                districtCol.style.opacity = '0';
+                setTimeout(() => {
+                    dateCol.style.opacity = '1';
+                    districtCol.style.opacity = '1';
+                }, 50);
+            }
+        });
+    }
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', function(e) {
+    // Ctrl+N for new officer (when not editing)
+    <?php if (!$editOfficer): ?>
+    if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault();
+        document.querySelector('input[name="name"]').focus();
+    }
+    <?php endif; ?>
+    
+    // Ctrl+E for export
+    if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
+        e.preventDefault();
+        exportToExcel();
+    }
 });
 </script>
 
